@@ -1,14 +1,26 @@
 # env
 .env
 .env.*
-# venv
-venv/
-__pycache__/
-*.pyc
+!.env.example
+
+# node
+node_modules/
+npm-debug.log*
 
 # firebase secrets
 *firebase-adminsdk*.json
 serviceAccount*.json
+
+# vercel
+.vercel/
+
+# logs
+*.log
+
+# leftover Python-era files (backend was converted to Node — see README_SETUP.md)
+venv/
+__pycache__/
+*.pyc
 
 # misc
 .DS_Store

@@ -16,17 +16,22 @@
 
 ---
 
-## Backend setup (Flask)
+## Backend setup (Node.js / Express)
+This backend was converted from Flask to a Node.js + Express API (MERN stack). It exposes the
+exact same HTTP routes as the previous Flask app, backed by the native MongoDB driver.
+
 ### 1) Install
 ```bash
-cd final-sem-proj-main
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+cd zenith_backend
+npm install
 ```
 
 ### 2) Create `.env` for backend
-Add these:
+Copy `.env.example` to `.env` and fill in your values:
+```bash
+cp .env.example .env
+```
+Key variables:
 ```env
 # Existing keys
 YOUTUBE_API_KEY=...
@@ -42,11 +47,36 @@ FIREBASE_SERVICE_ACCOUNT_PATH="/absolute/path/to/firebase-service-account.json"
 # OR:
 # FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account", ... }'
 ```
+See `.env.example` for the full list (SMTP/SendGrid/Mailgun, Judge0/Piston/Sphere Engine, etc.).
 
 ### 3) Run backend
 ```bash
-python3 server.py
+npm start        # production
+npm run dev       # auto-reload via nodemon
 ```
+The server listens on `PORT` (default `5000`), matching the previous Flask app's default.
+
+### Project layout
+```
+src/
+  index.js          # entrypoint (app.listen)
+  app.js             # Express app, CORS, JSON body parsing, route mounting
+  config/            # env, MongoDB, Firebase Admin
+  middleware/        # auth (Firebase token verification), multer upload
+  routes/            # one file per route group (auth, profile, courses, admin,
+                      # content/Gemini, chat, pdf, interview, ats, mocktest)
+  utils/             # email, Gemini, YouTube, PDF/DOCX extraction, GridFS,
+                      # code execution (Judge0/Piston/Sphere), SQL sandbox, etc.
+```
+
+### Known deviations from the Flask version
+- Profile photos are served exclusively from MongoDB GridFS (the Flask app's local-disk
+  fallback path was already dead code — `/profile/photo` never wrote to disk).
+- ATS "tailored resume" DOCX downloads are freshly generated from the AI-tailored section
+  text via the `docx` package, rather than editing the uploaded template's XML in place
+  (no Node equivalent of `python-docx`'s in-place paragraph editing). The PDF→DOCX
+  best-effort conversion path (`pdf2docx`) is dropped entirely — it already degraded to
+  `None` gracefully in the Flask app when unavailable.
 
 ---
 
@@ -136,7 +166,7 @@ Set one of the following:
 - `JUDGE0_BASE_URL=http://YOUR_JUDGE0_HOST:2358`
 - (No RapidAPI headers required)
 
-> Note: Language IDs can vary by Judge0 deployment. If your instance uses different language IDs, update `_JUDGE0_LANG_IDS` in `server.py`.
+> Note: Language IDs can vary by Judge0 deployment. If your instance uses different language IDs, update `JUDGE0_LANG_IDS` in `src/utils/codeExec.js`.
 
 ### 3) Endpoints
 - `POST /mocktest/session/create` → generate a test based on pattern (general/tech/coding)
