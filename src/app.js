@@ -21,6 +21,7 @@ const ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "https://www.zenithlearning.site",
+  "https://zenith-frontend-js.vercel.app",
 ];
 
 const app = express();
