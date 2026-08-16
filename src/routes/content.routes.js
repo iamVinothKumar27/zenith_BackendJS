@@ -4,7 +4,7 @@ import fs from "fs/promises";
 import { getDb } from "../config/mongo.js";
 import { requireUser } from "../middleware/auth.js";
 import genAI, { isQuotaError, extractRetryAfterSeconds } from "../utils/gemini.js";
-import { getBestVideo, extractTopicKeywords } from "../utils/youtube.js";
+import { getBestVideo, extractTopicKeywords, getVideoDurationSec } from "../utils/youtube.js";
 import { ytId } from "../utils/text.js";
 import { deriveCourseTitleFromVideo, deriveVideoMetaFromCourse, blockIfHeld } from "../utils/courseVideos.js";
 import { brandEmail, sendEmail, safePublicUrl } from "../utils/email.js";
@@ -31,17 +31,49 @@ async function blockedResponse(db, uid, courseTitle, res) {
   return false;
 }
 
+const SHORT_VIDEO_SECONDS = 180; // 3 minutes
+const MIN_TRANSCRIPT_CHARS = 300;
+
+/**
+ * Quiz/mindmap generation needs real study material. When the transcript is missing, too short,
+ * or not in English — or the video itself runs under 3 minutes — fall back to generating content
+ * from the video's topic (from the saved course roadmap) instead of the transcript.
+ */
+async function resolveGenerationSource({ db, uid, videoUrl, courseTitle, transcript, transcriptLanguage }) {
+  let useTopic = !transcript || transcript.trim().length < MIN_TRANSCRIPT_CHARS;
+  if (!useTopic && transcriptLanguage && !transcriptLanguage.toLowerCase().startsWith("en")) useTopic = true;
+  if (!useTopic) {
+    const durationSec = await getVideoDurationSec(videoUrl).catch(() => 0);
+    if (durationSec && durationSec < SHORT_VIDEO_SECONDS) useTopic = true;
+  }
+
+  if (!useTopic) return { mode: "transcript", transcript };
+
+  let topic = "";
+  if (courseTitle) {
+    const [, , derivedTitle] = await deriveVideoMetaFromCourse(db, uid, courseTitle, videoUrl);
+    topic = derivedTitle || "";
+  }
+  return { mode: "topic", topic: topic || courseTitle || "this video's topic" };
+}
+
 // ---------------- SUMMARY ----------------
+const SUMMARY_FORMAT_INSTRUCTIONS = {
+  paragraph: "Write the summary as 2-4 flowing prose paragraphs. Do NOT use bullet points, numbered lists, or headings — write in complete, well-connected sentences.",
+  bulletins: 'Write the summary as a concise bulleted list. Start every line with "- " for each key point. Do NOT write prose paragraphs.',
+  essay: "Write the summary as a structured essay: a short introduction paragraph, 2-4 body paragraphs that explore the main ideas in depth, and a concluding paragraph. Use complete, well-developed prose — no bullet points or headings.",
+};
+
 router.post("/summarize", requireUser, async (req, res) => {
   const user = req.user;
   try {
     const data = req.body || {};
     const transcript = (data.transcript || "").trim();
-    let summaryType = (data.type || "").trim();
+    let summaryType = (data.type || "").trim().toLowerCase();
     const videoUrl = (data.video_url || "").trim();
 
     if (!transcript) return res.status(400).json({ error: "Transcript not provided" });
-    if (!summaryType) summaryType = "Paragraph";
+    if (!SUMMARY_FORMAT_INSTRUCTIONS[summaryType]) summaryType = "paragraph";
 
     const db = await getDb();
 
@@ -52,7 +84,10 @@ router.post("/summarize", requireUser, async (req, res) => {
       return res.json({ summary: cached.summary, cached: true });
     }
 
-    const prompt = `Summarize the following transcript in the user's preferred format: ${summaryType}.
+    const prompt = `Summarize the following transcript for a student studying this topic.
+
+FORMAT REQUIREMENT: ${SUMMARY_FORMAT_INSTRUCTIONS[summaryType]}
+
 Keep it accurate and easy to study.
 
 TRANSCRIPT:
@@ -268,6 +303,32 @@ Only the quiz is required.
   return generateContentText(prompt);
 }
 
+/** Same output format as generateMcq, but built from the video's topic instead of a transcript —
+ * used when the transcript is missing, too short, or not in English. */
+async function generateMcqFromTopic(topic) {
+  const prompt = `You are an expert educational consultant.
+This video's transcript is unavailable, too short, or not in English, so create a multiple-choice quiz directly from your own knowledge of the topic below.
+
+Topic: ${topic}
+
+IMPORTANT LANGUAGE RULE:
+- The quiz MUST be written in ENGLISH ONLY.
+
+Create a multiple-choice quiz with 10 questions covering the key concepts, definitions, and applications of this topic. Each question should have 4 options.
+
+Format:
+Question 1: Question
+a) Option 1
+b) Option 2
+c) Option 3
+d) Option 4
+Correct Answer: Answer
+
+Only the quiz is required.
+`;
+  return generateContentText(prompt);
+}
+
 function normalizeText(s) {
   if (s == null) return "";
   return String(s).trim().toLowerCase().replace(/\s+/g, " ");
@@ -358,16 +419,21 @@ router.post("/generate-mcq", requireUser, async (req, res) => {
       return res.json({ quiz_id: cached.quiz_id, questions: cached.questions_only, cached: true });
     }
 
-    if (!transcript) {
-      const tdoc = await db.collection("transcripts").findOne({ uid: user.uid, url: videoUrl }, { sort: { updatedAt: -1 }, projection: { _id: 0, transcript: 1 } });
-      if (tdoc && tdoc.transcript) transcript = tdoc.transcript.trim();
-    }
+    const tdoc = await db
+      .collection("transcripts")
+      .findOne({ uid: user.uid, url: videoUrl }, { sort: { updatedAt: -1 }, projection: { _id: 0, transcript: 1, language: 1 } });
+    if (!transcript && tdoc && tdoc.transcript) transcript = tdoc.transcript.trim();
 
-    if (!transcript) {
-      return res.status(400).json({ error: "Transcript not available. Please fetch transcript first.", needs_transcript: true });
-    }
+    const source = await resolveGenerationSource({
+      db,
+      uid: user.uid,
+      videoUrl,
+      courseTitle,
+      transcript,
+      transcriptLanguage: tdoc?.language,
+    });
 
-    const quizText = await generateMcq(transcript);
+    const quizText = source.mode === "topic" ? await generateMcqFromTopic(source.topic) : await generateMcq(source.transcript);
     let quizData = parseToJson(quizText);
     quizData = quizData.slice(0, 10);
 
@@ -419,16 +485,24 @@ router.post("/generate-mindmap", requireUser, async (req, res) => {
       if (cached && cached.tree) return res.json({ tree: cached.tree, cached: true });
     }
 
-    if (!transcript) {
-      const tdoc = await db.collection("transcripts").findOne({ uid: user.uid, url: videoUrl }, { sort: { updatedAt: -1 }, projection: { _id: 0, transcript: 1 } });
-      if (tdoc && tdoc.transcript) transcript = tdoc.transcript.trim();
-    }
+    const tdoc = await db
+      .collection("transcripts")
+      .findOne({ uid: user.uid, url: videoUrl }, { sort: { updatedAt: -1 }, projection: { _id: 0, transcript: 1, language: 1 } });
+    if (!transcript && tdoc && tdoc.transcript) transcript = tdoc.transcript.trim();
 
-    if (!transcript) {
-      return res.status(400).json({ error: "Transcript not available. Please fetch transcript first.", needs_transcript: true });
-    }
+    const source = await resolveGenerationSource({
+      db,
+      uid: user.uid,
+      videoUrl,
+      courseTitle,
+      transcript,
+      transcriptLanguage: tdoc?.language,
+    });
 
-    const tree = await generateMindmapTree(transcript, title);
+    const tree =
+      source.mode === "topic"
+        ? await generateMindmapTree(source.topic, title, { mode: "topic" })
+        : await generateMindmapTree(source.transcript, title);
     const now = new Date();
     await db.collection("mindmaps").updateOne(
       { uid: user.uid, video_url: videoUrl },

@@ -204,4 +204,20 @@ export async function getBestVideo(query, usedVideoIds = new Set(), blockedKeywo
   return null;
 }
 
+/** Fetch a single video's duration in seconds. Returns 0 on failure, missing key, or unknown ID. */
+export async function getVideoDurationSec(videoUrl) {
+  try {
+    if (!config.youtubeApiKey) return 0;
+    const videoId = ytId(videoUrl || "");
+    if (!videoId) return 0;
+    const videoData = await youtube.videos.list({ part: ["contentDetails"], id: [videoId] });
+    const item0 = (videoData.data.items || [])[0];
+    const iso = item0?.contentDetails?.duration || "";
+    return parseIso8601DurationToSeconds(iso);
+  } catch (e) {
+    console.log("[YOUTUBE DURATION ERROR]", e.message || e);
+    return 0;
+  }
+}
+
 export default youtube;

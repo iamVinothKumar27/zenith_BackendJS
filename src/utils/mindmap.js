@@ -134,26 +134,23 @@ export function buildFallbackMindmap(transcript, safeTitle) {
   return { name: safeTitle, children: finalChildren };
 }
 
-/** Generate a detailed, concept-focused JSON tree mindmap from a transcript. */
-export async function generateMindmapTree(transcript, title = "Mindmap") {
+/** Generate a detailed, concept-focused JSON tree mindmap from a transcript, or from a topic
+ * name alone when the transcript is missing, too short, or not in English (opts.mode = "topic"). */
+export async function generateMindmapTree(transcript, title = "Mindmap", opts = {}) {
+  const mode = opts.mode === "topic" ? "topic" : "transcript";
   const safeTitle = (title || "Mindmap").trim().slice(0, 80);
-  transcript = (transcript || "").trim();
-  if (!transcript) return { name: safeTitle, children: [] };
+  const sourceText = (transcript || "").trim();
+  if (!sourceText) return { name: safeTitle, children: [] };
 
-  const prompt = `
-You are an expert instructor. Read the transcript, infer the underlying concepts, and produce a DETAILED mindmap that helps a student study.
-
+  const sharedRules = `
 Output rules (STRICT):
 - Output ONLY valid JSON (no markdown, no commentary, no backticks).
 - Schema (recursive): {"name": string, "children": [schema]}
 - Root MUST be exactly: {"name": "${safeTitle}", "children": [...]}
 - Labels must be short: 2–8 words (no long sentences).
-- Remove filler/intro/outro like: "hello everyone", "subscribe", "thanks for watching".
-- Prefer concepts, definitions, steps, formulas, comparisons, examples, pitfalls.
 - Expand acronyms when possible (e.g., SGD -> Stochastic Gradient Descent).
 - Depth target: 4–6 levels.
 - Breadth target: 6–10 top-level branches; each branch should have 3–10 children (when possible).
-- If transcript is shallow, enrich with standard subtopics (1–2 nodes per concept) WITHOUT hallucinating facts.
 
 Recommended top-level branches (adapt as relevant):
 - Definition & Purpose
@@ -164,10 +161,28 @@ Recommended top-level branches (adapt as relevant):
 - Comparisons (if any)
 - Metrics / Evaluation (if any)
 - Pitfalls / Challenges
-- Summary / Takeaways
+- Summary / Takeaways`.trim();
+
+  const prompt =
+    mode === "topic"
+      ? `
+You are an expert instructor. The video's transcript is unavailable, too short, or not in English, so build a DETAILED study mindmap for this topic from your own subject-matter knowledge instead.
+
+Topic: ${sourceText}
+
+${sharedRules}
+- Cover the TOPIC itself accurately and generally — do not invent specifics about a video you haven't seen.
+`.trim()
+      : `
+You are an expert instructor. Read the transcript, infer the underlying concepts, and produce a DETAILED mindmap that helps a student study.
+
+${sharedRules}
+- Remove filler/intro/outro like: "hello everyone", "subscribe", "thanks for watching".
+- Prefer concepts, definitions, steps, formulas, comparisons, examples, pitfalls.
+- If transcript is shallow, enrich with standard subtopics (1–2 nodes per concept) WITHOUT hallucinating facts.
 
 Transcript:
-${transcript}
+${sourceText}
 `.trim();
 
   try {
@@ -218,6 +233,7 @@ ${transcript}
       err.retryAfter = ra;
       throw err;
     }
-    return buildFallbackMindmap(transcript, safeTitle);
+    if (mode === "topic") return { name: safeTitle, children: [] };
+    return buildFallbackMindmap(sourceText, safeTitle);
   }
 }
